@@ -12,5 +12,5 @@ Task scheduler
 Actions:
 
 wscript.exe
-D:\xampp\htdocs\chatbot\start-nextjs.vbs
-D:\xampp\htdocs\chatbot
+D:\api_server\start-nextjs.vbs
+D:\api_server
