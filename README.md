@@ -7,3 +7,10 @@
 thêm vào PATH sau: "D:\api_server\node_modules\@tensorflow\tfjs-node\deps\lib"
 node -e "require('@tensorflow/tfjs-node'); console.log('✅ TensorFlow OK');"
 ```
+
+Task scheduler
+Actions:
+
+wscript.exe
+D:\xampp\htdocs\chatbot\start-nextjs.vbs
+D:\xampp\htdocs\chatbot
