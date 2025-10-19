@@ -14,3 +14,9 @@ Actions:
 wscript.exe
 D:\api_server\start-nextjs.vbs
 D:\api_server
+
+
+netstat -ano | findstr :3000
+taskkill /PID 1832 /F
+
+Remove-Item -Recurse -Force .next
