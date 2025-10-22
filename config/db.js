@@ -4,7 +4,7 @@ const pool = mysql.createPool({
   host: "localhost",
   user: "root",
   password: "",
-  database: "api_kdkids",
+  database: "kdkids",
   connectionLimit: 10,
   dateStrings: true,
   timezone: "+07:00",

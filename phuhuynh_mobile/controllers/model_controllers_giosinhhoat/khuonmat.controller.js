@@ -59,7 +59,7 @@ exports.recognizeFace = async (req, res) => {
     const imgBuffer = Buffer.from(base64, 'base64');
     const imgCanvas = await canvas.loadImage(imgBuffer);
 
-    // === Phát hiện khuôn mặt ===
+    // === Nhận diện khuôn mặt ===
     const detection = await faceapi
       .detectSingleFace(imgCanvas)
       .withFaceLandmarks()
@@ -71,7 +71,7 @@ exports.recognizeFace = async (req, res) => {
 
     const queryDesc = detection.descriptor;
 
-    // === Lấy dữ liệu nhân viên đang hoạt động ===
+    // === Lấy danh sách khuôn mặt nhân viên đang hoạt động ===
     const [rows] = await pool.query(`
       SELECT i.id_nv, i.ho_ten, i.descriptor
       FROM image_nv AS i
@@ -83,10 +83,9 @@ exports.recognizeFace = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Không có dữ liệu khuôn mặt nhân viên' });
     }
 
-    // === So sánh khuôn mặt ===
+    // === So khớp descriptor ===
     let bestMatch = null;
     let bestDistance = Infinity;
-
     for (const row of rows) {
       const storedDesc = Float32Array.from(JSON.parse(row.descriptor));
       let sum = 0;
@@ -111,82 +110,119 @@ exports.recognizeFace = async (req, res) => {
     }
 
     const now = new Date();
-    const today = now.toISOString().split('T')[0];
-
+    const today = now.toISOString().split('T')[0]; // yyyy-mm-dd
     console.log(`✅ Nhận diện: ${bestMatch.ho_ten} (${bestDistance.toFixed(3)})`);
 
-    // === Kiểm tra xem hôm nay đã có dữ liệu chấm công chưa ===
-    const [checkAll] = await pool.query(`
-      SELECT COUNT(*) AS total FROM ccnv 
-      WHERE DATE(ngay_cc_db) = ? OR DATE(ngay_cc_cb) = ?
-    `, [today, today]);
+    // === Lấy kỳ công hiện tại ===
+    const [indexRows] = await pool.execute(`
+      SELECT id_index 
+      FROM indexcount 
+      WHERE ? BETWEEN ngay_bat_dau AND ngay_ket_thuc 
+      LIMIT 1
+    `, [today]);
 
-    const isFirstOfDay = checkAll[0].total === 0;
-
-    // === Nếu là người đầu tiên hôm nay -> tạo dữ liệu cho toàn bộ nhân viên hoạt động ===
-    if (isFirstOfDay) {
-      console.log(`[INFO] 🆕 Người đầu tiên hôm nay -> tạo bảng công cho toàn bộ nhân viên đang hoạt động`);
-      await pool.execute(`
-        INSERT INTO ccnv (id_nv, ho_ten, ngay_cc_db, ngay_cc_cb, he_so_cc, cc_muon)
-        SELECT id_nv, ho_ten, NULL, NULL, NULL, NULL
-        FROM nhanvien
-        WHERE trang_thai = 1
-      `);
-    }
-    
-
-    // === Kiểm tra nhân viên hôm nay ===
-    const [checkUser] = await pool.query(`
-      SELECT * FROM ccnv WHERE id_nv = ? AND (DATE(ngay_cc_db) = ? OR DATE(ngay_cc_cb) = ?)
-    `, [bestMatch.id_nv, today, today]);
-
-    const record = checkUser[0];
-
-    // === Nếu chưa có sáng thì cập nhật sáng ===
-    if (!record || !record.ngay_cc_db) {
-      await pool.execute(`UPDATE ccnv SET ngay_cc_db = ? WHERE id_nv = ?`, [now, bestMatch.id_nv]);
-      console.log(`🌞 ${bestMatch.ho_ten} đã chấm công VÀO thành công.`);
-      return res.json({
-        success: true,
-        
-        id_nv: bestMatch.id_nv,
-        ho_ten: bestMatch.ho_ten
+    if (indexRows.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: `Không tìm thấy kỳ công cho ngày ${today}. Vui lòng tạo kỳ công mới.`
       });
     }
 
-    // === Nếu chưa có chiều thì cập nhật chiều ===
-    if (!record.ngay_cc_cb) {
-      await pool.execute(`UPDATE ccnv SET ngay_cc_cb = ? WHERE id_nv = ?`, [now, bestMatch.id_nv]);
-      console.log(`🌇 ${bestMatch.ho_ten} đã chấm công RA thành công.`);
+    const id_index = indexRows[0].id_index;
+
+    // === Nếu hôm nay chưa có dữ liệu chấm công → tạo sẵn toàn bộ nhân viên ===
+    const [checkToday] = await pool.query(`
+      SELECT COUNT(*) AS total FROM ccnv WHERE DATE(ngay_cc_db) = ? AND id_index = ?
+    `, [today, id_index]);
+
+    if (checkToday[0].total === 0) {
+      console.log(`[INFO] 🆕 Tạo dữ liệu công mặc định cho ngày ${today}`);
+      const startOfDay = `${today} 00:00:00`;
+      await pool.execute(`
+        INSERT INTO ccnv (id_nv, ho_ten, ngay_cc_db, ngay_cc_cb, he_so_cc, cc_muon, id_index)
+        SELECT id_nv, ho_ten, ?, ?, NULL, 0, ?
+        FROM nhanvien
+        WHERE trang_thai = 1
+      `, [startOfDay, startOfDay, id_index]);
+      console.log(`[INFO] ✅ Đã tạo công mặc định cho ${today}`);
+    }
+
+    // === Lấy bản ghi công nhân viên hôm nay ===
+    const [rowsUser] = await pool.query(`
+      SELECT * FROM ccnv
+      WHERE id_nv = ? AND id_index = ? AND DATE(ngay_cc_db) = ?
+      LIMIT 1
+    `, [bestMatch.id_nv, id_index, today]);
+
+    if (rowsUser.length === 0) {
+      return res.status(400).json({ success: false, message: 'Không tìm thấy bản ghi công hôm nay' });
+    }
+
+    const record = rowsUser[0];
+    const hour = now.getHours();
+    const minute = now.getMinutes();
+
+    // === Xử lý logic chấm công ===
+    let status = "";
+    let message = "";
+    let cc_muon = 0;
+
+    // Nếu chưa có giờ vào
+    if (!record.ngay_cc_db || record.ngay_cc_db.endsWith("00:00:00")) {
+      if (hour > 6 || (hour === 6 && minute > 30)) {
+        status = "vao_muon";
+        cc_muon = 1;
+        message = `${bestMatch.ho_ten} đã đến muộn (${hour}:${minute}).`;
+      } else {
+        status = "vao_thanhcong";
+        message = `${bestMatch.ho_ten} đã chấm công vào đúng giờ (${hour}:${minute}).`;
+      }
+
+      await pool.execute(
+        `UPDATE ccnv SET ngay_cc_db = ?, cc_muon = ? WHERE id_ccnv = ?`,
+        [now, cc_muon, record.id_ccnv]
+      );
+
+      return res.json({ success: true, id_nv: bestMatch.id_nv, ho_ten: bestMatch.ho_ten, status, message });
+    }
+
+    // Nếu chưa có giờ ra
+    if (!record.ngay_cc_cb || record.ngay_cc_cb.endsWith("00:00:00")) {
+      if (hour < 16 || (hour === 16 && minute < 30)) {
+        status = "ra_som";
+        message = `${bestMatch.ho_ten} ra về sớm (${hour}:${minute}).`;
+      } else {
+        status = "ra_thanhcong";
+        message = `${bestMatch.ho_ten} đã ra về đúng giờ (${hour}:${minute}).`;
+      }
+
+      await pool.execute(`UPDATE ccnv SET ngay_cc_cb = ? WHERE id_ccnv = ?`, [now, record.id_ccnv]);
     } else {
-      // Đã có cả 2 -> cập nhật lại chiều
-      await pool.execute(`UPDATE ccnv SET ngay_cc_cb = ? WHERE id_nv = ?`, [now, bestMatch.id_nv]);
-      console.log(`🔁 ${bestMatch.ho_ten} cập nhật lại thời gian tan ca.`);
+      // Nếu đã có giờ ra thì cập nhật lại
+      status = "ra_capnhat";
+      message = `${bestMatch.ho_ten} đã cập nhật lại giờ ra (${hour}:${minute}).`;
+      await pool.execute(`UPDATE ccnv SET ngay_cc_cb = ? WHERE id_ccnv = ?`, [now, record.id_ccnv]);
     }
 
-    // === Tính hệ số công (chỉ khi có đủ vào & ra) ===
-    const [recordNow] = await pool.query(`
-      SELECT ngay_cc_db, ngay_cc_cb FROM ccnv WHERE id_nv = ? AND (DATE(ngay_cc_db) = ? OR DATE(ngay_cc_cb) = ?)
-    `, [bestMatch.id_nv, today, today]);
+    // === Tính lại hệ số công ===
+    const start = new Date(record.ngay_cc_db);
+    const end = new Date(now);
+    const diffHours = isNaN(start.getTime()) ? 0 : Math.round(((end - start) / (1000 * 60 * 60)) * 100) / 100;
+    let he_so_cc = 0.0;
+    if (diffHours >= 6) he_so_cc = 1.0;
+    else if (diffHours >= 3.5) he_so_cc = 0.5;
 
-    if (recordNow.length > 0 && recordNow[0].ngay_cc_db && recordNow[0].ngay_cc_cb) {
-      const start = new Date(recordNow[0].ngay_cc_db);
-      const end = new Date(recordNow[0].ngay_cc_cb);
-      const totalWorkMinutes = (end - start) / (1000 * 60);
-
-      const fullDayMinutes = (16.5 - 6.5) * 60; // 600 phút
-      let he_so_cc = 0;
-      if (totalWorkMinutes >= fullDayMinutes) he_so_cc = 1.0;
-      else if (totalWorkMinutes >= fullDayMinutes / 2) he_so_cc = 0.5;
-
-      await pool.execute(`UPDATE ccnv SET he_so_cc = ? WHERE id_nv = ?`, [he_so_cc, bestMatch.id_nv]);
-    }
+    await pool.execute(`UPDATE ccnv SET he_so_cc = ? WHERE id_ccnv = ?`, [he_so_cc, record.id_ccnv]);
+    console.log(`[✅] ${bestMatch.ho_ten} - Giờ làm: ${diffHours}h - Hệ số: ${he_so_cc} (${status})`);
 
     return res.json({
       success: true,
-      
       id_nv: bestMatch.id_nv,
-      ho_ten: bestMatch.ho_ten
+      ho_ten: bestMatch.ho_ten,
+      status,
+      message,
+      diffHours,
+      he_so_cc
     });
 
   } catch (err) {
