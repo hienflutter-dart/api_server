@@ -122,9 +122,11 @@ exports.recognizeFace = async (req, res) => {
     `, [today]);
 
     if (indexRows.length === 0) {
+      console.log(`Không tìm thấy kỳ công cho ngày ${today}. Vui lòng tạo kỳ công mới.`);
       return res.status(400).json({
         success: false,
         message: `Không tìm thấy kỳ công cho ngày ${today}. Vui lòng tạo kỳ công mới.`
+        
       });
     }
 
@@ -169,7 +171,7 @@ exports.recognizeFace = async (req, res) => {
 
     // Nếu chưa có giờ vào
     if (!record.ngay_cc_db || record.ngay_cc_db.endsWith("00:00:00")) {
-      if (hour > 6 || (hour === 6 && minute > 30)) {
+      if ( ((hour === 6 && minute > 30) && (hour === 9 && minute <= 30)) || (hour > 6) && (hour < 10)) {
         status = "vao_muon";
         cc_muon = 1;
         message = `${bestMatch.ho_ten} đã đến muộn (${hour}:${minute}).`;
@@ -188,7 +190,7 @@ exports.recognizeFace = async (req, res) => {
 
     // Nếu chưa có giờ ra
     if (!record.ngay_cc_cb || record.ngay_cc_cb.endsWith("00:00:00")) {
-      if (hour < 16 || (hour === 16 && minute < 30)) {
+      if (((hour === 16 && minute < 30)  &&(hour === 15  && minute >= 30)) || ((hour > 15) && (hour < 17))){
         status = "ra_som";
         message = `${bestMatch.ho_ten} ra về sớm (${hour}:${minute}).`;
       } else {
@@ -198,9 +200,15 @@ exports.recognizeFace = async (req, res) => {
 
       await pool.execute(`UPDATE ccnv SET ngay_cc_cb = ? WHERE id_ccnv = ?`, [now, record.id_ccnv]);
     } else {
-      // Nếu đã có giờ ra thì cập nhật lại
-      status = "ra_capnhat";
-      message = `${bestMatch.ho_ten} đã cập nhật lại giờ ra (${hour}:${minute}).`;
+      if (((hour === 16 && minute < 30)  &&(hour === 15  && minute >= 30)) || ((hour > 15) && (hour < 17))){
+        status = "ra_som";
+        message = `${bestMatch.ho_ten} ra về sớm (${hour}:${minute}).`;
+      }
+      else {
+        status = "ra_thanhcong";
+        message = `${bestMatch.ho_ten} đã ra về đúng giờ (${hour}:${minute}).`;
+      }
+
       await pool.execute(`UPDATE ccnv SET ngay_cc_cb = ? WHERE id_ccnv = ?`, [now, record.id_ccnv]);
     }
 
