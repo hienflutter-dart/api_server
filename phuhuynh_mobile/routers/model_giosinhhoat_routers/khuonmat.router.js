@@ -8,4 +8,6 @@ router.post('/register', faceController.registerFace);
 // Nhận diện khuôn mặt
 router.post('/recognize', faceController.recognizeFace);
 
+router.post('/initAttendance', faceController.initAttendance);
+
 module.exports = router;

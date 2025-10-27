@@ -45,33 +45,77 @@ exports.registerFace = async (req, res) => {
   }
 };
 
+
+exports.initAttendance = async (req, res) => {
+  try {
+    const now = new Date();
+    const today = now.toISOString().split('T')[0];
+
+    // 1️⃣ Tìm kỳ công chứa ngày hiện tại
+    const [indexRows] = await pool.execute(`
+      SELECT id_index
+      FROM indexcount
+      WHERE ? >= ngay_bat_dau AND ? <= ngay_ket_thuc
+      LIMIT 1
+    `, [today, today]);
+
+    if (indexRows.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: `Không tìm thấy kỳ công cho ngày ${today}.`
+      });
+    }
+
+    const id_index = indexRows[0].id_index;
+
+    // 2️⃣ Kiểm tra đã có dữ liệu công hôm nay chưa
+    const [checkToday] = await pool.query(`
+      SELECT COUNT(*) AS total FROM ccnv
+      WHERE DATE(ngay_cc_db) = ? AND id_index = ?
+    `, [today, id_index]);
+
+    // 3️⃣ Nếu chưa có → khởi tạo
+    if (checkToday[0].total === 0) {
+      const startOfDay = `${today} 00:00:00`;
+      await pool.execute(`
+        INSERT INTO ccnv (id_nv, ho_ten, ngay_cc_db, ngay_cc_cb, he_so_cc, cc_muon, id_index)
+        SELECT id_nv, ho_ten, ?, ?, NULL, 0, ?
+        FROM nhanvien
+        WHERE trang_thai = 1
+      `, [startOfDay, startOfDay, id_index]);
+      console.log(`[INFO] ✅ Khởi tạo công mặc định cho ${today}`);
+      return res.json({ success: true, message: `Đã khởi tạo công cho ${today}` });
+    }
+
+    return res.json({ success: true, message: `Công cho ${today} đã tồn tại` });
+  } catch (err) {
+    console.error('[ERROR:initAttendance]', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+
 exports.recognizeFace = async (req, res) => {
   try {
     const { image } = req.body;
-    if (!image) {
-      return res.status(400).json({ success: false, message: 'Thiếu dữ liệu ảnh' });
-    }
+    if (!image)
+      return res.status(400).json({ success: false, message: "Thiếu dữ liệu ảnh" });
 
-    console.log(`[DEBUG] 📸 Bắt đầu nhận diện khuôn mặt`);
-
-    // === Giải mã ảnh từ base64 ===
-    const base64 = image.replace(/^data:image\/\w+;base64,/, '');
-    const imgBuffer = Buffer.from(base64, 'base64');
+    const base64 = image.replace(/^data:image\/\w+;base64,/, "");
+    const imgBuffer = Buffer.from(base64, "base64");
     const imgCanvas = await canvas.loadImage(imgBuffer);
 
-    // === Nhận diện khuôn mặt ===
     const detection = await faceapi
       .detectSingleFace(imgCanvas)
       .withFaceLandmarks()
       .withFaceDescriptor();
 
-    if (!detection) {
-      return res.status(400).json({ success: false, message: 'Không phát hiện khuôn mặt' });
-    }
+    if (!detection)
+      return res.status(400).json({ success: false, message: "Không phát hiện khuôn mặt" });
 
     const queryDesc = detection.descriptor;
 
-    // === Lấy danh sách khuôn mặt nhân viên đang hoạt động ===
+    // === Lấy danh sách khuôn mặt đang hoạt động ===
     const [rows] = await pool.query(`
       SELECT i.id_nv, i.ho_ten, i.descriptor
       FROM image_nv AS i
@@ -79,9 +123,8 @@ exports.recognizeFace = async (req, res) => {
       WHERE n.trang_thai = 1
     `);
 
-    if (rows.length === 0) {
-      return res.status(404).json({ success: false, message: 'Không có dữ liệu khuôn mặt nhân viên' });
-    }
+    if (rows.length === 0)
+      return res.status(404).json({ success: false, message: "Không có dữ liệu khuôn mặt" });
 
     // === So khớp descriptor ===
     let bestMatch = null;
@@ -104,13 +147,13 @@ exports.recognizeFace = async (req, res) => {
     if (bestDistance >= THRESHOLD) {
       return res.json({
         success: false,
-        message: 'Không khớp với khuôn mặt nào trong hệ thống',
-        distance: bestDistance.toFixed(3)
+        message: "Không khớp với khuôn mặt nào trong hệ thống",
+        distance: bestDistance.toFixed(3),
       });
     }
 
     const now = new Date();
-    const today = now.toISOString().split('T')[0]; // yyyy-mm-dd
+    const today = now.toISOString().split("T")[0];
     console.log(`✅ Nhận diện: ${bestMatch.ho_ten} (${bestDistance.toFixed(3)})`);
 
     // === Lấy kỳ công hiện tại ===
@@ -121,57 +164,30 @@ exports.recognizeFace = async (req, res) => {
       LIMIT 1
     `, [today]);
 
-    if (indexRows.length === 0) {
-      console.log(`Không tìm thấy kỳ công cho ngày ${today}. Vui lòng tạo kỳ công mới.`);
-      return res.status(400).json({
-        success: false,
-        message: `Không tìm thấy kỳ công cho ngày ${today}. Vui lòng tạo kỳ công mới.`
-        
-      });
-    }
+    if (indexRows.length === 0)
+      return res.status(400).json({ success: false, message: "Chưa khởi tạo kỳ công hôm nay" });
 
     const id_index = indexRows[0].id_index;
 
-    // === Nếu hôm nay chưa có dữ liệu chấm công → tạo sẵn toàn bộ nhân viên ===
-    const [checkToday] = await pool.query(`
-      SELECT COUNT(*) AS total FROM ccnv WHERE DATE(ngay_cc_db) = ? AND id_index = ?
-    `, [today, id_index]);
-
-    if (checkToday[0].total === 0) {
-      console.log(`[INFO] 🆕 Tạo dữ liệu công mặc định cho ngày ${today}`);
-      const startOfDay = `${today} 00:00:00`;
-      await pool.execute(`
-        INSERT INTO ccnv (id_nv, ho_ten, ngay_cc_db, ngay_cc_cb, he_so_cc, cc_muon, id_index)
-        SELECT id_nv, ho_ten, ?, ?, NULL, 0, ?
-        FROM nhanvien
-        WHERE trang_thai = 1
-      `, [startOfDay, startOfDay, id_index]);
-      console.log(`[INFO] ✅ Đã tạo công mặc định cho ${today}`);
-    }
-
-    // === Lấy bản ghi công nhân viên hôm nay ===
+    // === Lấy bản ghi công của nhân viên ===
     const [rowsUser] = await pool.query(`
-      SELECT * FROM ccnv
-      WHERE id_nv = ? AND id_index = ? AND DATE(ngay_cc_db) = ?
-      LIMIT 1
+      SELECT * FROM ccnv WHERE id_nv = ? AND id_index = ? AND DATE(ngay_cc_db) = ? LIMIT 1
     `, [bestMatch.id_nv, id_index, today]);
 
-    if (rowsUser.length === 0) {
-      return res.status(400).json({ success: false, message: 'Không tìm thấy bản ghi công hôm nay' });
-    }
+    if (rowsUser.length === 0)
+      return res.status(400).json({ success: false, message: "Chưa có dữ liệu công hôm nay" });
 
     const record = rowsUser[0];
     const hour = now.getHours();
     const minute = now.getMinutes();
 
-    // === Xử lý logic chấm công ===
     let status = "";
     let message = "";
     let cc_muon = 0;
 
-    // Nếu chưa có giờ vào
+    // === Giờ vào ===
     if (!record.ngay_cc_db || record.ngay_cc_db.endsWith("00:00:00")) {
-      if ( ((hour === 6 && minute > 30) && (hour === 9 && minute <= 30)) || (hour > 6) && (hour < 10)) {
+      if (hour > 6 || (hour === 6 && minute > 30)) {
         status = "vao_muon";
         cc_muon = 1;
         message = `${bestMatch.ho_ten} đã đến muộn (${hour}:${minute}).`;
@@ -185,26 +201,15 @@ exports.recognizeFace = async (req, res) => {
         [now, cc_muon, record.id_ccnv]
       );
 
-      return res.json({ success: true, id_nv: bestMatch.id_nv, ho_ten: bestMatch.ho_ten, status, message });
+      return res.json({ success: true, ho_ten: bestMatch.ho_ten, status, message });
     }
 
-    // Nếu chưa có giờ ra
+    // === Giờ ra ===
     if (!record.ngay_cc_cb || record.ngay_cc_cb.endsWith("00:00:00")) {
-      if (((hour === 16 && minute < 30)  &&(hour === 15  && minute >= 30)) || ((hour > 15) && (hour < 17))){
+      if (hour < 16 || (hour === 16 && minute < 30)) {
         status = "ra_som";
         message = `${bestMatch.ho_ten} ra về sớm (${hour}:${minute}).`;
       } else {
-        status = "ra_thanhcong";
-        message = `${bestMatch.ho_ten} đã ra về đúng giờ (${hour}:${minute}).`;
-      }
-
-      await pool.execute(`UPDATE ccnv SET ngay_cc_cb = ? WHERE id_ccnv = ?`, [now, record.id_ccnv]);
-    } else {
-      if (((hour === 16 && minute < 30)  &&(hour === 15  && minute >= 30)) || ((hour > 15) && (hour < 17))){
-        status = "ra_som";
-        message = `${bestMatch.ho_ten} ra về sớm (${hour}:${minute}).`;
-      }
-      else {
         status = "ra_thanhcong";
         message = `${bestMatch.ho_ten} đã ra về đúng giờ (${hour}:${minute}).`;
       }
@@ -214,27 +219,26 @@ exports.recognizeFace = async (req, res) => {
 
     // === Tính lại hệ số công ===
     const start = new Date(record.ngay_cc_db);
-    const end = new Date(now);
-    const diffHours = isNaN(start.getTime()) ? 0 : Math.round(((end - start) / (1000 * 60 * 60)) * 100) / 100;
+    const diffHours = isNaN(start.getTime())
+      ? 0
+      : Math.round(((now - start) / (1000 * 60 * 60)) * 100) / 100;
+
     let he_so_cc = 0.0;
     if (diffHours >= 6) he_so_cc = 1.0;
     else if (diffHours >= 3.5) he_so_cc = 0.5;
 
     await pool.execute(`UPDATE ccnv SET he_so_cc = ? WHERE id_ccnv = ?`, [he_so_cc, record.id_ccnv]);
-    console.log(`[✅] ${bestMatch.ho_ten} - Giờ làm: ${diffHours}h - Hệ số: ${he_so_cc} (${status})`);
 
-    return res.json({
+    res.json({
       success: true,
-      id_nv: bestMatch.id_nv,
       ho_ten: bestMatch.ho_ten,
       status,
       message,
       diffHours,
-      he_so_cc
+      he_so_cc,
     });
-
   } catch (err) {
-    console.error('[ERROR] recognizeFace:', err);
-    res.status(500).json({ success: false, message: 'Lỗi máy chủ khi nhận diện khuôn mặt' });
+    console.error("[ERROR] recognizeFace:", err);
+    res.status(500).json({ success: false, message: "Lỗi máy chủ khi nhận diện khuôn mặt" });
   }
 };
